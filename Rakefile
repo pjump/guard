@@ -4,9 +4,11 @@ require "bundler/gem_tasks"
 default_tasks = []
 
 require "rspec/core/rake_task"
-default_tasks << RSpec::Core::RakeTask.new(:spec) do |t|
-  t.verbose = Nenv.ci?
-end
+namespace :eager do
+  default_tasks << RSpec::Core::RakeTask.new(:spec) do |t|
+    t.verbose = Nenv.ci?
+  end
+end 
 
 require "guard/rake_task"
 
@@ -175,3 +177,72 @@ namespace :release do
     releaser.github
   end
 end
+
+namespace :tup do
+  file "Tupfile" => 'test_stats_collector.sh' do |t|
+
+    ruby_env = " GEM_HOME=#{ENV['GEM_HOME']} GEM_PATH=#{ENV['GEM_PATH']} PATH=#{ENV['PATH']} "
+    bundler_path = `bundle show bundle`.chomp
+    bundle_exec = " ruby -I #{bundler_path}/lib #{bundler_path}/bin/bundle exec "
+
+    touch 'specs.tup'
+
+    string = <<-EOF.gsub(/^ {6}/,'')
+      include tests.tup
+      include specs.tup
+      include cukes.tup
+      RUBY_ENV = #{ruby_env}
+      BUNDLE_EXEC = #{bundle_exec}
+      SPEC_CMD = rspec 
+      : foreach $(SPECS) |> $(RUBY_ENV) $(BUNDLE_EXEC) $(SPEC_CMD) %f >| %o || echo "Failed with: $?" >> %o; cat %o |> %f.txt {spec_outputs}
+      : {spec_outputs} |> ./test_stats_collector.sh spec/succeeding_specs.txt spec/failing_specs.txt %f |> spec/succeeding_specs.txt spec/failing_specs.txt
+      EOF
+      File.write(t.name, string)
+  end
+  file "test_stats_collector.sh" do |t|
+    File.write(t.name, <<-EOF.gsub(/^ {6}/,'')
+      #!/bin/bash
+
+      #Usage: collect_test_results success_heap.txt failing_heap.txt [result1 result2 ... ]
+
+      success_heap=$1
+      failing_heap=$2
+      touch "$1" "$2"
+
+      shift; shift
+
+      for arg in "$@"
+      do
+        if tail -1 "$arg" | grep -q "^Failed"
+        then
+          cat "$arg" >> "$failing_heap"
+        else
+          cat "$arg" >> "$success_heap"
+        fi
+      done
+               EOF
+              )
+    chmod "u+x", t.name
+  end
+
+  file '.tup' do
+    sh *%w[tup init]
+  end
+
+  desc 'Initialize tup'
+  task :init => ['.tup','Tupfile'] 
+
+  file "specs.lst" do |t|
+    sh "find spec -name '*_spec.rb' > #{t.name}"
+  end
+
+  file "specs.tup" => "specs.lst" do
+    sh "sed 's/^/SPECS += /' < specs.lst > specs.tup"
+  end
+
+  task "spec" => %w[init specs.tup] do
+    sh "tup spec"
+  end
+end
+
+task 'spec' => 'tup:spec'
